@@ -1,4 +1,5 @@
 from ortools.linear_solver import pywraplp
+import pandas as pd
 
 def suitability_penalty(pace, leg):
     if leg in ["Leg3","Leg5"] and pace > 9:
@@ -7,7 +8,7 @@ def suitability_penalty(pace, leg):
         return 1
     return 0
 
-def optimize_with_constraints(df, legs, num_teams, locked):
+def optimize_with_constraints(df, legs, num_teams, locked, min_female):
 
     solver = pywraplp.Solver.CreateSolver('SCIP')
 
@@ -29,9 +30,25 @@ def optimize_with_constraints(df, legs, num_teams, locked):
         for l in leg_list:
             solver.Add(sum(x[(r,t,l)] for r in runners) == 1)
 
+    # gender constraint
+    for t in range(num_teams):
+        solver.Add(
+            sum(
+                x[(r,t,l)] * int(df.loc[r,"is_female"])
+                for r in runners for l in leg_list
+            ) >= min_female
+        )
+
+    # enforce female-only if needed
+    if min_female == 5:
+        for r in runners:
+            if not df.loc[r,"is_female"]:
+                for t in range(num_teams):
+                    for l in leg_list:
+                        solver.Add(x[(r,t,l)] == 0)
+
     # objective
     team_times = []
-
     for t in range(num_teams):
         time = solver.Sum(
             x[(r,t,l)] * (
@@ -52,7 +69,6 @@ def optimize_with_constraints(df, legs, num_teams, locked):
     solver.Solve()
 
     results = []
-
     for r in runners:
         for t in range(num_teams):
             for l in leg_list:
@@ -64,5 +80,4 @@ def optimize_with_constraints(df, legs, num_teams, locked):
                         "leg_time": df.loc[r, l+"_time"]
                     })
 
-    import pandas as pd
     return pd.DataFrame(results)
