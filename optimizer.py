@@ -1,5 +1,11 @@
 from ortools.linear_solver import pywraplp
-import pandas as pd
+
+def suitability_penalty(pace, leg):
+    if leg in ["Leg3","Leg5"] and pace > 9:
+        return 4
+    if leg == "Leg4" and pace < 7:
+        return 1
+    return 0
 
 def optimize_with_constraints(df, legs, num_teams, locked):
 
@@ -18,16 +24,20 @@ def optimize_with_constraints(df, legs, num_teams, locked):
     for r in runners:
         solver.Add(sum(x[(r,t,l)] for t in range(num_teams) for l in leg_list) == 1)
 
-    # each team gets one per leg
+    # one per leg per team
     for t in range(num_teams):
         for l in leg_list:
             solver.Add(sum(x[(r,t,l)] for r in runners) == 1)
 
     # objective
     team_times = []
+
     for t in range(num_teams):
         time = solver.Sum(
-            x[(r,t,l)] * df.loc[r, l+"_time"]
+            x[(r,t,l)] * (
+                df.loc[r, l+"_time"] +
+                suitability_penalty(df.loc[r,"pace"], l)
+            )
             for r in runners for l in leg_list
         )
         team_times.append(time)
@@ -35,7 +45,8 @@ def optimize_with_constraints(df, legs, num_teams, locked):
     avg = solver.Sum(team_times) / num_teams
 
     solver.Minimize(
-        solver.Sum((team_times[t] - avg)*(team_times[t] - avg) for t in range(num_teams))
+        solver.Sum((team_times[t] - avg)*(team_times[t] - avg)
+        for t in range(num_teams))
     )
 
     solver.Solve()
@@ -47,10 +58,11 @@ def optimize_with_constraints(df, legs, num_teams, locked):
             for l in leg_list:
                 if x[(r,t,l)].solution_value() > 0.5:
                     results.append({
-                        "name": df.loc[r, "name"],
+                        "name": df.loc[r,"name"],
                         "team": t+1,
                         "leg": l,
                         "leg_time": df.loc[r, l+"_time"]
                     })
 
+    import pandas as pd
     return pd.DataFrame(results)
