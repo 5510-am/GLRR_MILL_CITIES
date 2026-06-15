@@ -1,14 +1,7 @@
 from ortools.linear_solver import pywraplp
 import pandas as pd
 
-def suitability_penalty(pace, leg):
-    if leg in ["Leg3","Leg5"] and pace > 9:
-        return 4
-    if leg == "Leg4" and pace < 7:
-        return 1
-    return 0
-
-def optimize_with_constraints(df, legs, num_teams, locked, min_female):
+def optimize_with_constraints(df, legs, num_teams, min_female):
 
     solver = pywraplp.Solver.CreateSolver('SCIP')
 
@@ -25,7 +18,7 @@ def optimize_with_constraints(df, legs, num_teams, locked, min_female):
     for r in runners:
         solver.Add(sum(x[(r,t,l)] for t in range(num_teams) for l in leg_list) == 1)
 
-    # one per leg per team
+    # each team gets one per leg
     for t in range(num_teams):
         for l in leg_list:
             solver.Add(sum(x[(r,t,l)] for r in runners) == 1)
@@ -39,22 +32,11 @@ def optimize_with_constraints(df, legs, num_teams, locked, min_female):
             ) >= min_female
         )
 
-    # enforce female-only if needed
-    if min_female == 5:
-        for r in runners:
-            if not df.loc[r,"is_female"]:
-                for t in range(num_teams):
-                    for l in leg_list:
-                        solver.Add(x[(r,t,l)] == 0)
-
-    # objective
+    # objective: balance teams
     team_times = []
     for t in range(num_teams):
         time = solver.Sum(
-            x[(r,t,l)] * (
-                df.loc[r, l+"_time"] +
-                suitability_penalty(df.loc[r,"pace"], l)
-            )
+            x[(r,t,l)] * df.loc[r, l+"_time"]
             for r in runners for l in leg_list
         )
         team_times.append(time)
@@ -66,7 +48,10 @@ def optimize_with_constraints(df, legs, num_teams, locked, min_female):
         for t in range(num_teams))
     )
 
-    solver.Solve()
+    status = solver.Solve()
+
+    if status != pywraplp.Solver.OPTIMAL:
+        return pd.DataFrame()
 
     results = []
     for r in runners:
@@ -77,7 +62,7 @@ def optimize_with_constraints(df, legs, num_teams, locked, min_female):
                         "name": df.loc[r,"name"],
                         "team": t+1,
                         "leg": l,
-                        "leg_time": df.loc[r, l+"_time"]
+                        "leg_time": df.loc[r,l+"_time"]
                     })
 
     return pd.DataFrame(results)

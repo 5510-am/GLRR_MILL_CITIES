@@ -19,25 +19,21 @@ legs = {
 }
 
 # -----------------------------
-# MILL CITIES CATEGORIES (5-person ONLY)
+# CATEGORIES (5-person only)
 # -----------------------------
 categories = {
     "CO": {"min_age": 18, "min_female": 2},
     "FO": {"min_age": 18, "min_female": 5},
     "MO": {"min_age": 18, "min_female": 0},
-
     "CSM": {"min_age": 30, "min_female": 2},
     "FSM": {"min_age": 30, "min_female": 5},
     "MSM": {"min_age": 30, "min_female": 0},
-
     "CM": {"min_age": 40, "min_female": 2},
     "FM": {"min_age": 40, "min_female": 5},
     "MM": {"min_age": 40, "min_female": 0},
-
     "CS": {"min_age": 50, "min_female": 2},
     "FS": {"min_age": 50, "min_female": 5},
     "MS": {"min_age": 50, "min_female": 0},
-
     "CV": {"min_age": 60, "min_female": 2},
     "MV": {"min_age": 60, "min_female": 0}
 }
@@ -83,49 +79,75 @@ for col in required:
 df["gender"] = df["gender"].str.upper()
 
 # -----------------------------
-# CATEGORY
+# SELECT CATEGORY
 # -----------------------------
 category_code = st.sidebar.selectbox("Team Category", list(categories.keys()))
 category = categories[category_code]
 
+# -----------------------------
+# FILTER ELIGIBLE
+# -----------------------------
 eligible = df[df["age"] >= category["min_age"]].copy()
+eligible["is_female"] = eligible["gender"] == "F"
 
 if len(eligible) < 5:
     st.error("Not enough eligible runners")
     st.stop()
 
-eligible["is_female"] = eligible["gender"] == "F"
+# -----------------------------
+# DETERMINE MAX TEAMS
+# -----------------------------
+min_female = category["min_female"]
 
-eligible = calculate_leg_times(eligible)
+num_female = eligible["is_female"].sum()
+total = len(eligible)
 
-num_teams = st.sidebar.slider("Number of Teams", 1, max(1,len(eligible)//5), len(eligible)//5)
+max_teams_by_size = total // 5
+max_teams_by_gender = num_female // min_female if min_female > 0 else max_teams_by_size
+
+max_teams = min(max_teams_by_size, max_teams_by_gender)
+
+if max_teams == 0:
+    st.error("Not enough runners to form valid teams")
+    st.stop()
+
+num_teams = st.sidebar.slider("Number of Teams", 1, max_teams, max_teams)
+
+# -----------------------------
+# SELECT ONLY VALID RUNNERS
+# -----------------------------
+required_total = num_teams * 5
+required_female = num_teams * min_female
+
+eligible = eligible.sort_values("pace")
+
+selected_f = eligible[eligible["is_female"]].head(required_female)
+remaining = eligible.drop(selected_f.index)
+selected_other = remaining.head(required_total - required_female)
+
+selected = pd.concat([selected_f, selected_other])
+selected = calculate_leg_times(selected)
+
+excluded = eligible.drop(selected.index)
 
 # -----------------------------
 # OPTIMIZE
 # -----------------------------
-if "results" not in st.session_state:
-    st.session_state.results = None
-
-if st.button("⚖️ Optimize Teams"):
+if st.button("⚖️ Build Teams"):
     results = optimize_with_constraints(
-        eligible,
+        selected,
         legs,
         num_teams,
-        locked=[],
-        min_female=category["min_female"]
+        min_female
     )
-    st.session_state.results = results
+    st.session_state["results"] = results
 
 # -----------------------------
 # OUTPUT
 # -----------------------------
-if st.session_state.results is not None:
+if "results" in st.session_state:
 
-    res = st.session_state.results
-
-    if res.empty:
-        st.error("No valid teams found — check age/gender balance")
-        st.stop()
+    res = st.session_state["results"]
 
     st.header("🏃 Teams")
 
@@ -133,61 +155,36 @@ if st.session_state.results is not None:
         team_df = res[res["team"] == t]
 
         st.markdown(f"### 🟦 {random.choice(team_names)} (Team {t})")
-        total = team_df["leg_time"].sum()
 
-        st.caption(f"⏱ Total: {round(total,1)} min")
+        total_time = team_df["leg_time"].sum()
+        st.caption(f"⏱ Total: {round(total_time,1)} min")
 
         for _, r in team_df.iterrows():
             st.write(f"{r['leg']} → {r['name']} ({round(r['leg_time'],1)})")
 
     # -----------------------------
-    # EDIT MODE
-    # -----------------------------
-    st.header("✏️ Edit Assignments")
-    edited = st.data_editor(res, use_container_width=True)
-
-    # -----------------------------
-    # SWAP TOOL
-    # -----------------------------
-    st.subheader("🔁 Quick Swap")
-    r1 = st.selectbox("Runner 1", edited["name"])
-    r2 = st.selectbox("Runner 2", edited["name"], key="swap")
-
-    if st.button("Swap"):
-        i1 = edited[edited["name"] == r1].index[0]
-        i2 = edited[edited["name"] == r2].index[0]
-        temp = edited.loc[i1, ["team","leg"]].copy()
-        edited.loc[i1, ["team","leg"]] = edited.loc[i2, ["team","leg"]]
-        edited.loc[i2, ["team","leg"]] = temp
-        st.session_state.results = edited
-
-    # -----------------------------
-    # PERFORMANCE
+    # TEAM PERFORMANCE
     # -----------------------------
     st.header("📊 Team Performance")
 
-    team_summary = edited.groupby("team")["leg_time"].sum().reset_index()
-    team_summary.rename(columns={"leg_time":"total_time"}, inplace=True)
-    team_summary["rank"] = team_summary["total_time"].rank()
+    team_summary = res.groupby("team")["leg_time"].sum()
+    st.bar_chart(team_summary)
 
-    st.dataframe(team_summary.sort_values("total_time"))
-    st.bar_chart(team_summary.set_index("team")["total_time"])
-
-    spread = team_summary["total_time"].max() - team_summary["total_time"].min()
+    spread = team_summary.max() - team_summary.min()
     st.metric("Time Spread", f"{round(spread,1)} min")
 
     # -----------------------------
-    # EMAIL EXPORT
+    # EXCLUDED RUNNERS
     # -----------------------------
-    def format_email(df):
-        txt = ""
-        for t in sorted(df["team"].unique()):
-            txt += f"\nTeam {t}\n"
-            for _, r in df[df["team"]==t].iterrows():
-                txt += f"{r['leg']}: {r['name']}\n"
-        return txt
+    if len(excluded) > 0:
+        st.header("🚫 Not Assigned to Teams")
+        st.dataframe(excluded[["name","pace","age","gender"]])
 
-    st.text_area("📧 Copy for Email", format_email(edited))
-
-    csv = edited.to_csv(index=False).encode()
-    st.download_button("Download CSV", csv, "relay_teams.csv")
+    # -----------------------------
+    # EXPORT
+    # -----------------------------
+    st.download_button(
+        "Download CSV",
+        res.to_csv(index=False),
+        "relay_teams.csv"
+    )
