@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import random
 from optimizer import optimize_with_constraints
 
@@ -25,26 +24,8 @@ categories = {
     "CO": {"min_age": 18, "min_female": 2},
     "FO": {"min_age": 18, "min_female": 5},
     "MO": {"min_age": 18, "min_female": 0},
-    "CSM": {"min_age": 30, "min_female": 2},
-    "FSM": {"min_age": 30, "min_female": 5},
-    "MSM": {"min_age": 30, "min_female": 0},
     "CM": {"min_age": 40, "min_female": 2},
-    "FM": {"min_age": 40, "min_female": 5},
-    "MM": {"min_age": 40, "min_female": 0},
-    "CS": {"min_age": 50, "min_female": 2},
-    "FS": {"min_age": 50, "min_female": 5},
-    "MS": {"min_age": 50, "min_female": 0},
-    "CV": {"min_age": 60, "min_female": 2},
-    "MV": {"min_age": 60, "min_female": 0}
 }
-
-team_names = [
-    "Negative Splitters",
-    "Miles & Smiles",
-    "Relay Rebels",
-    "Pace Cadets",
-    "Draft Dodgers"
-]
 
 # -----------------------------
 # HELPERS
@@ -53,138 +34,136 @@ def elevation_adjustment(elev_gain):
     return (elev_gain * 0.3) / 60
 
 def calculate_leg_times(df):
-    for leg, data in legs.items():
-        base = df["pace"] * data["dist"] * data["difficulty"]
-        elev = elevation_adjustment(data["elev"])
-        df[leg+"_time"] = base + elev
+    for leg, d in legs.items():
+        df[leg+"_time"] = df["pace"] * d["dist"] * d["difficulty"] + elevation_adjustment(d["elev"])
     return df
+
+def assign_team_tiers(df):
+    tt = df.groupby("team")["leg_time"].sum().reset_index().sort_values("leg_time")
+    n = len(tt)
+    tt["tier"] = ["A" if i < n/3 else "B" if i < 2*n/3 else "C" for i in range(n)]
+    return df.merge(tt, on="team")
+
+def assign_team_names(df):
+    out = []
+    for cat in df["category"].unique():
+        for tier in ["A","B","C"]:
+            teams = sorted(df[(df["category"]==cat)&(df["tier"]==tier)]["team"].unique())
+            for i,t in enumerate(teams,1):
+                out.append({"category":cat,"team":t,"team_name":f"{cat}-{tier}{i}"})
+    return df.merge(pd.DataFrame(out), on=["category","team"])
+
+def generate_email(df):
+    text=""
+    for cat in df["category"].unique():
+        text+=f"\n==== {cat} ====\n"
+        for tier in ["A","B","C"]:
+            grp=df[(df["category"]==cat)&(df["tier"]==tier)]
+            if len(grp)==0: continue
+            text+=f"\n-- {tier} Teams --\n"
+            for name,g in grp.groupby("team_name"):
+                t=round(g["leg_time"].sum(),1)
+                text+=f"\n{name} ({t} min)\n"
+                for _,r in g.iterrows():
+                    text+=f"{r['leg']}: {r['name']}\n"
+    return text
 
 # -----------------------------
 # INPUT
 # -----------------------------
-uploaded = st.file_uploader("Upload CSV (name, pace, age, gender)", type="csv")
+file = st.file_uploader("Upload CSV (name, pace, age, gender)")
 
-if not uploaded:
-    st.info("Upload a CSV to begin")
+if not file:
     st.stop()
 
-df = pd.read_csv(uploaded)
-
-required = ["name","pace","age","gender"]
-for col in required:
-    if col not in df.columns:
-        st.error(f"Missing column: {col}")
-        st.stop()
-
+df = pd.read_csv(file)
 df["gender"] = df["gender"].str.upper()
 
-# -----------------------------
-# SELECT CATEGORY
-# -----------------------------
-category_code = st.sidebar.selectbox("Team Category", list(categories.keys()))
-category = categories[category_code]
+selected_categories = st.sidebar.multiselect(
+    "Categories", list(categories.keys()), ["CO"]
+)
 
-# -----------------------------
-# FILTER ELIGIBLE
-# -----------------------------
-eligible = df[df["age"] >= category["min_age"]].copy()
-eligible["is_female"] = eligible["gender"] == "F"
+all_results=[]
+used=set()
 
-if len(eligible) < 5:
-    st.error("Not enough eligible runners")
-    st.stop()
+for cat_code in selected_categories:
 
-# -----------------------------
-# DETERMINE MAX TEAMS
-# -----------------------------
-min_female = category["min_female"]
+    st.header(f"🏁 {cat_code}")
+    cat=categories[cat_code]
 
-num_female = eligible["is_female"].sum()
-total = len(eligible)
+    eligible=df[(df["age"]>=cat["min_age"])].drop(index=list(used),errors="ignore")
+    eligible["is_female"]=eligible["gender"]=="F"
 
-max_teams_by_size = total // 5
-max_teams_by_gender = num_female // min_female if min_female > 0 else max_teams_by_size
+    if len(eligible)<5:
+        st.warning("Not enough runners")
+        continue
 
-max_teams = min(max_teams_by_size, max_teams_by_gender)
+    min_female=cat["min_female"]
 
-if max_teams == 0:
-    st.error("Not enough runners to form valid teams")
-    st.stop()
+    max_teams=min(len(eligible)//5, 
+        (eligible["is_female"].sum()//min_female if min_female else len(eligible)//5))
 
-num_teams = st.sidebar.slider("Number of Teams", 1, max_teams, max_teams)
+    if max_teams==0:
+        st.warning("No valid teams possible")
+        continue
 
-# -----------------------------
-# SELECT ONLY VALID RUNNERS
-# -----------------------------
-required_total = num_teams * 5
-required_female = num_teams * min_female
+    num_teams=st.slider(f"{cat_code} Teams",1,max_teams,max_teams,key=cat_code)
 
-eligible = eligible.sort_values("pace")
+    req_total=num_teams*5
+    req_f=num_teams*min_female
 
-selected_f = eligible[eligible["is_female"]].head(required_female)
-remaining = eligible.drop(selected_f.index)
-selected_other = remaining.head(required_total - required_female)
+    eligible=eligible.sort_values("pace")
 
-selected = pd.concat([selected_f, selected_other])
-selected = calculate_leg_times(selected)
+    sel_f=eligible[eligible["is_female"]].head(req_f)
+    rem=eligible.drop(sel_f.index)
+    sel_o=rem.head(req_total-req_f)
 
-excluded = eligible.drop(selected.index)
+    selected=pd.concat([sel_f,sel_o])
+    used.update(selected.index)
 
-# -----------------------------
-# OPTIMIZE
-# -----------------------------
-if st.button("⚖️ Build Teams"):
-    results = optimize_with_constraints(
-        selected,
-        legs,
-        num_teams,
-        min_female
-    )
-    st.session_state["results"] = results
+    selected=calculate_leg_times(selected)
+
+    res=optimize_with_constraints(selected,legs,num_teams,min_female)
+    res["category"]=cat_code
+    all_results.append(res)
 
 # -----------------------------
 # OUTPUT
 # -----------------------------
-if "results" in st.session_state:
+if len(all_results)>0:
 
-    res = st.session_state["results"]
+    final_df=pd.concat(all_results)
 
-    st.header("🏃 Teams")
+    final_df=assign_team_tiers(final_df)
+    final_df=assign_team_names(final_df)
 
-    for t in sorted(res["team"].unique()):
-        team_df = res[res["team"] == t]
+    # DISPLAY
+    for tier in ["A","B","C"]:
+        st.header(f"🏅 {tier} Teams")
+        for name,g in final_df[final_df["tier"]==tier].groupby("team_name"):
+            st.subheader(name)
+            for _,r in g.iterrows():
+                st.write(f"{r['leg']} → {r['name']}")
 
-        st.markdown(f"### 🟦 {random.choice(team_names)} (Team {t})")
+    # EDITOR
+    st.header("✏️ Adjust")
+    edited=st.data_editor(final_df, use_container_width=True)
 
-        total_time = team_df["leg_time"].sum()
-        st.caption(f"⏱ Total: {round(total_time,1)} min")
+    # SWAP
+    st.subheader("Swap")
+    r1=st.selectbox("Runner 1", edited["name"])
+    r2=st.selectbox("Runner 2", edited["name"], key="swap")
 
-        for _, r in team_df.iterrows():
-            st.write(f"{r['leg']} → {r['name']} ({round(r['leg_time'],1)})")
+    if st.button("Swap"):
+        df2=edited.copy()
+        i1=df2[df2["name"]==r1].index[0]
+        i2=df2[df2["name"]==r2].index[0]
+        tmp=df2.loc[i1,["team","leg"]]
+        df2.loc[i1,["team","leg"]]=df2.loc[i2,["team","leg"]]
+        df2.loc[i2,["team","leg"]]=tmp
+        final_df=df2
 
-    # -----------------------------
-    # TEAM PERFORMANCE
-    # -----------------------------
-    st.header("📊 Team Performance")
-
-    team_summary = res.groupby("team")["leg_time"].sum()
-    st.bar_chart(team_summary)
-
-    spread = team_summary.max() - team_summary.min()
-    st.metric("Time Spread", f"{round(spread,1)} min")
-
-    # -----------------------------
-    # EXCLUDED RUNNERS
-    # -----------------------------
-    if len(excluded) > 0:
-        st.header("🚫 Not Assigned to Teams")
-        st.dataframe(excluded[["name","pace","age","gender"]])
-
-    # -----------------------------
-    # EXPORT
-    # -----------------------------
-    st.download_button(
-        "Download CSV",
-        res.to_csv(index=False),
-        "relay_teams.csv"
-    )
+    # EMAIL
+    st.header("📧 Email Export")
+    email=generate_email(final_df)
+    st.text_area("Copy",email,height=300)
